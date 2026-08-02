@@ -1,0 +1,22 @@
+{
+  "title": "CORE Family Hub",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect CORE Family Hub",
+        "description": "In CORE, open Settings > Integrations > Home Assistant and create a pairing code. Enter it here. Home Assistant makes only outbound connections; you do not need to expose your home to the internet.",
+        "data": {
+          "bridge_url": "CORE bridge URL",
+          "pairing_code": "Pairing code"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not connect or the pairing code is invalid or expired.",
+      "invalid_auth": "CORE rejected the connection. Create a new pairing code."
+    },
+    "abort": {
+      "already_configured": "This CORE connection is already configured."
+    }
+  }
+}
