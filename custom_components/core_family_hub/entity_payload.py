@@ -66,6 +66,7 @@ def state_to_payload(
     registry_device_id: str | None = None,
     area_id: str | None = None,
     area_name: str | None = None,
+    entity_category: str | None = None,
 ) -> dict[str, Any] | None:
     """Return an allowlisted state payload or None for unsupported domains."""
     entity_id = str(getattr(state, "entity_id", ""))
@@ -88,6 +89,7 @@ def state_to_payload(
         "registryDeviceId": registry_device_id,
         "areaId": area_id,
         "areaName": area_name,
+        "entityCategory": entity_category,
         "friendlyName": friendly_name,
         "state": raw_state,
         "attributes": attributes,

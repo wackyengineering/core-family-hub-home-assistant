@@ -25,10 +25,13 @@ services. HACS is recommended because it also manages updates.
 
 ## Supported devices
 
-The initial release synchronizes lights, switches, fans, climate entities,
-sensors, binary sensors, covers, and explicitly selected scenes. Owners decide
-which entities CORE may show or control and whether a safe entity may be
-controlled from a shared display.
+The integration synchronizes primary lights, switches, fans, climate entities,
+sensors, binary sensors, covers, and scenes. Useful diagnostic telemetry is
+retained as read-only data for CORE insights, but it is not offered as a device
+the household can expose or control. Configuration entities and entities that
+are disabled or hidden in Home Assistant stay local and are not sent to CORE.
+Owners decide which primary entities CORE may show or control and whether a safe
+entity may be controlled from a shared display.
 
 Report integration issues in this repository. CORE application support and
 documentation remain at [core.wackyengineering.com](https://core.wackyengineering.com).

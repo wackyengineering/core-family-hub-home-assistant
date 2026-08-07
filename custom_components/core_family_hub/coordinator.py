@@ -24,6 +24,7 @@ from .const import (
     SUPPORTED_DOMAINS,
 )
 from .entity_payload import state_to_payload
+from .entity_filter import entity_category_value, should_sync_entity
 
 _LOGGER = logging.getLogger(__name__)
 STORE_VERSION = 1
@@ -76,6 +77,8 @@ class CoreBridgeRuntime:
     def _payload_for_state(self, state: State) -> dict[str, Any] | None:
         entity_registry, device_registry, area_registry = self._registries()
         entity_entry = entity_registry.async_get(state.entity_id)
+        if not should_sync_entity(state, entity_entry):
+            return None
         device_entry = device_registry.async_get(entity_entry.device_id) if entity_entry and entity_entry.device_id else None
         area_id = (entity_entry.area_id if entity_entry else None) or (device_entry.area_id if device_entry else None)
         area_entry = area_registry.async_get_area(area_id) if area_id else None
@@ -85,6 +88,7 @@ class CoreBridgeRuntime:
             registry_device_id=entity_entry.device_id if entity_entry else None,
             area_id=area_id,
             area_name=area_entry.name if area_entry else None,
+            entity_category=entity_category_value(entity_entry),
         )
 
     async def _async_full_sync(self) -> None:
@@ -110,6 +114,9 @@ class CoreBridgeRuntime:
     def _state_changed(self, event: Event) -> None:
         state = event.data.get("new_state")
         if state is None or state.domain not in SUPPORTED_DOMAINS:
+            return
+        entity_registry = er.async_get(self.hass)
+        if not should_sync_entity(state, entity_registry.async_get(state.entity_id)):
             return
         self._pending_states[state.entity_id] = state
         self._state_wakeup.set()
