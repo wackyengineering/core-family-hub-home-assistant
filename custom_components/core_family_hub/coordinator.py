@@ -21,6 +21,7 @@ from .const import (
     FALLBACK_COMMAND_POLL_SECONDS,
     HEARTBEAT_SECONDS,
     MAX_STATE_BATCH,
+    STARTUP_RECONCILIATION_SECONDS,
     STATE_BATCH_SECONDS,
     SUPPORTED_DOMAINS,
 )
@@ -42,6 +43,7 @@ class CoreBridgeRuntime:
         self._command_wakeup = asyncio.Event()
         self._realtime_ready = asyncio.Event()
         self._state_wakeup = asyncio.Event()
+        self._sync_lock = asyncio.Lock()
         self._pending_states: dict[str, State] = {}
         self._tasks: list[asyncio.Task[Any]] = []
         self._unsub_state: Callable[[], None] | None = None
@@ -53,13 +55,22 @@ class CoreBridgeRuntime:
         stored = await self._store.async_load() or {}
         self._cursor = int(stored.get("cursor", 0))
         self._executed = dict(stored.get("executed", {}))
-        await self._async_full_sync()
+        # Subscribe before the network snapshot so entities that finish loading
+        # during startup cannot remain unavailable until their next manual state
+        # change.
         self._unsub_state = self.hass.bus.async_listen(EVENT_STATE_CHANGED, self._state_changed)
+        try:
+            await self._async_full_sync()
+        except Exception:
+            self._unsub_state()
+            self._unsub_state = None
+            raise
         self._tasks = [
             self.hass.async_create_task(self._state_worker()),
             self.hass.async_create_task(self._command_worker()),
             self.hass.async_create_task(self._heartbeat_worker()),
             self.hass.async_create_task(self._realtime_worker()),
+            self.hass.async_create_task(self._startup_reconciliation_worker()),
         ]
 
     async def async_stop(self) -> None:
@@ -94,23 +105,38 @@ class CoreBridgeRuntime:
         )
 
     async def _async_full_sync(self) -> None:
-        payloads = [
-            payload
-            for state in self.hass.states.async_all()
-            if state.domain in SUPPORTED_DOMAINS
-            if (payload := self._payload_for_state(state)) is not None
-        ]
-        self._cursor += 1
-        snapshot_entity_ids = [payload["entityId"] for payload in payloads]
-        for offset in range(0, len(payloads) or 1, MAX_STATE_BATCH):
-            chunk = payloads[offset : offset + MAX_STATE_BATCH]
-            await self.client.async_sync(
-                chunk,
-                self._cursor,
-                full_snapshot=offset + MAX_STATE_BATCH >= len(payloads),
-                snapshot_entity_ids=snapshot_entity_ids if offset + MAX_STATE_BATCH >= len(payloads) else None,
-            )
-        await self._save_store()
+        async with self._sync_lock:
+            payloads = [
+                payload
+                for state in self.hass.states.async_all()
+                if state.domain in SUPPORTED_DOMAINS
+                if (payload := self._payload_for_state(state)) is not None
+            ]
+            self._cursor += 1
+            snapshot_entity_ids = [payload["entityId"] for payload in payloads]
+            for offset in range(0, len(payloads) or 1, MAX_STATE_BATCH):
+                chunk = payloads[offset : offset + MAX_STATE_BATCH]
+                await self.client.async_sync(
+                    chunk,
+                    self._cursor,
+                    full_snapshot=offset + MAX_STATE_BATCH >= len(payloads),
+                    snapshot_entity_ids=snapshot_entity_ids if offset + MAX_STATE_BATCH >= len(payloads) else None,
+                )
+            await self._save_store()
+
+    async def _startup_reconciliation_worker(self) -> None:
+        """Refresh once after other Home Assistant integrations finish loading."""
+        try:
+            await asyncio.wait_for(self._stop.wait(), STARTUP_RECONCILIATION_SECONDS)
+            return
+        except TimeoutError:
+            pass
+        try:
+            await self._async_full_sync()
+        except CoreBridgeAuthenticationError:
+            return
+        except CoreBridgeError as err:
+            _LOGGER.warning("Could not reconcile CORE entity state after startup: %s", err)
 
     @callback
     def _state_changed(self, event: Event) -> None:
@@ -133,9 +159,10 @@ class CoreBridgeRuntime:
             if not payloads:
                 continue
             try:
-                self._cursor += 1
-                await self.client.async_sync(payloads, self._cursor)
-                await self._save_store()
+                async with self._sync_lock:
+                    self._cursor += 1
+                    await self.client.async_sync(payloads, self._cursor)
+                    await self._save_store()
                 if self._pending_states:
                     self._state_wakeup.set()
             except CoreBridgeError as err:
