@@ -43,37 +43,43 @@ class CoreFamilyHubConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
         errors: dict[str, str] = {}
         if user_input is not None:
-            bridge_url = _valid_bridge_url(user_input[CONF_BRIDGE_URL])
-            client = CoreBridgeClient(async_get_clientsession(self.hass), bridge_url)
             try:
-                paired = await client.async_pair(
-                    user_input[CONF_PAIRING_CODE],
-                    PROTOCOL_VERSION,
-                    HOME_ASSISTANT_VERSION,
-                )
-                connection_id = str(paired["connectionId"])
-                await self.async_set_unique_id(connection_id)
-                self._abort_if_unique_id_configured()
-                return self.async_create_entry(
-                    title=str(paired.get("displayName") or "CORE Family Hub"),
-                    data={
-                        CONF_BRIDGE_URL: bridge_url,
-                        CONF_CONNECTION_ID: connection_id,
-                        CONF_CONNECTOR_SECRET: str(paired["connectorSecret"]),
-                        CONF_TENANT_ID: str(paired["tenantId"]),
-                        CONF_REALTIME_URL: str(paired["realtimeUrl"]),
-                        CONF_REALTIME_KEY: str(paired["realtimeKey"]),
-                        CONF_WAKE_TOPIC: str(paired["wakeTopic"]),
-                    },
-                )
-            except CoreBridgeAuthenticationError:
-                errors["base"] = "invalid_auth"
-            except (CoreBridgeError, KeyError, ValueError):
-                errors["base"] = "cannot_connect"
+                bridge_url = _valid_bridge_url(str(user_input[CONF_BRIDGE_URL]))
+            except (KeyError, TypeError, ValueError, vol.Invalid):
+                errors[CONF_BRIDGE_URL] = "invalid_url"
+            else:
+                client = CoreBridgeClient(async_get_clientsession(self.hass), bridge_url)
+                try:
+                    paired = await client.async_pair(
+                        str(user_input[CONF_PAIRING_CODE]).strip(),
+                        PROTOCOL_VERSION,
+                        HOME_ASSISTANT_VERSION,
+                    )
+                    connection_id = str(paired["connectionId"])
+                    await self.async_set_unique_id(connection_id)
+                    self._abort_if_unique_id_configured()
+                    return self.async_create_entry(
+                        title=str(paired.get("displayName") or "CORE Family Hub"),
+                        data={
+                            CONF_BRIDGE_URL: bridge_url,
+                            CONF_CONNECTION_ID: connection_id,
+                            CONF_CONNECTOR_SECRET: str(paired["connectorSecret"]),
+                            CONF_TENANT_ID: str(paired["tenantId"]),
+                            CONF_REALTIME_URL: str(paired["realtimeUrl"]),
+                            CONF_REALTIME_KEY: str(paired["realtimeKey"]),
+                            CONF_WAKE_TOPIC: str(paired["wakeTopic"]),
+                        },
+                    )
+                except CoreBridgeAuthenticationError:
+                    errors["base"] = "invalid_auth"
+                except (CoreBridgeError, KeyError, TypeError, ValueError):
+                    errors["base"] = "cannot_connect"
 
+        # Home Assistant serializes this schema before sending it to the frontend.
+        # Keep field validators serializable and perform strict HTTPS validation above.
         schema = vol.Schema(
             {
-                vol.Required(CONF_BRIDGE_URL, default=DEFAULT_BRIDGE_URL): _valid_bridge_url,
+                vol.Required(CONF_BRIDGE_URL, default=DEFAULT_BRIDGE_URL): str,
                 vol.Required(CONF_PAIRING_CODE): str,
             }
         )

@@ -13,7 +13,8 @@
     },
     "error": {
       "cannot_connect": "Could not connect or the pairing code is invalid or expired.",
-      "invalid_auth": "CORE rejected the connection. Create a new pairing code."
+      "invalid_auth": "CORE rejected the connection. Create a new pairing code.",
+      "invalid_url": "Enter a valid HTTPS CORE bridge URL."
     },
     "abort": {
       "already_configured": "This CORE connection is already configured."
