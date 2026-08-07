@@ -148,6 +148,7 @@ class CoreBridgeClient:
     async def async_listen_for_command_wakeups(
         self,
         on_wakeup: Callable[[], Awaitable[None]],
+        on_connected: Callable[[], Awaitable[None]],
         stop_event: asyncio.Event,
     ) -> None:
         """Listen for public broadcasts containing only an opaque command ID."""
@@ -172,6 +173,7 @@ class CoreBridgeClient:
                 }
             )
             heartbeat_ref = 1
+            join_confirmed = False
             while not stop_event.is_set():
                 try:
                     message = await asyncio.wait_for(socket.receive(), timeout=25)
@@ -192,6 +194,18 @@ class CoreBridgeClient:
                 try:
                     payload = json.loads(message.data)
                 except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if (
+                    isinstance(payload, dict)
+                    and payload.get("event") == "phx_reply"
+                    and payload.get("ref") == "1"
+                ):
+                    reply = payload.get("payload")
+                    if not isinstance(reply, dict) or reply.get("status") != "ok":
+                        raise CoreBridgeError("CORE realtime channel join was rejected")
+                    if not join_confirmed:
+                        join_confirmed = True
+                        await on_connected()
                     continue
                 if (
                     isinstance(payload, dict)

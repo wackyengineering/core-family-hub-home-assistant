@@ -17,6 +17,7 @@ from .bridge_client import CoreBridgeAuthenticationError, CoreBridgeClient, Core
 from .command_policy import UnsafeCommand, validate_command
 from .const import (
     COMMAND_PULL_LIMIT,
+    CONNECTED_COMMAND_POLL_SECONDS,
     FALLBACK_COMMAND_POLL_SECONDS,
     HEARTBEAT_SECONDS,
     MAX_STATE_BATCH,
@@ -39,6 +40,7 @@ class CoreBridgeRuntime:
         self.client = client
         self._stop = asyncio.Event()
         self._command_wakeup = asyncio.Event()
+        self._realtime_ready = asyncio.Event()
         self._state_wakeup = asyncio.Event()
         self._pending_states: dict[str, State] = {}
         self._tasks: list[asyncio.Task[Any]] = []
@@ -146,7 +148,12 @@ class CoreBridgeRuntime:
     async def _command_worker(self) -> None:
         while not self._stop.is_set():
             try:
-                await asyncio.wait_for(self._command_wakeup.wait(), FALLBACK_COMMAND_POLL_SECONDS)
+                poll_seconds = (
+                    CONNECTED_COMMAND_POLL_SECONDS
+                    if self._realtime_ready.is_set()
+                    else FALLBACK_COMMAND_POLL_SECONDS
+                )
+                await asyncio.wait_for(self._command_wakeup.wait(), poll_seconds)
             except TimeoutError:
                 pass
             self._command_wakeup.clear()
@@ -222,17 +229,27 @@ class CoreBridgeRuntime:
     async def _realtime_worker(self) -> None:
         delay = 1
         while not self._stop.is_set():
+            self._realtime_ready.clear()
             try:
-                await self.client.async_listen_for_command_wakeups(self._wake_commands, self._stop)
+                await self.client.async_listen_for_command_wakeups(
+                    self._wake_commands,
+                    self._mark_realtime_ready,
+                    self._stop,
+                )
                 delay = 1
             except (CoreBridgeError, OSError) as err:
                 if self._stop.is_set():
                     return
                 _LOGGER.debug("CORE realtime wake-up disconnected: %s", err)
+                self._command_wakeup.set()
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 60)
 
     async def _wake_commands(self) -> None:
+        self._command_wakeup.set()
+
+    async def _mark_realtime_ready(self) -> None:
+        self._realtime_ready.set()
         self._command_wakeup.set()
 
     async def _save_store(self) -> None:
