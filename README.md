@@ -33,5 +33,10 @@ are disabled or hidden in Home Assistant stay local and are not sent to CORE.
 Owners decide which primary entities CORE may show or control and whether a safe
 entity may be controlled from a shared display.
 
+Some device integrations do not correctly identify their internal settings as
+configuration entities. CORE applies a narrow fallback for recognized Auto-off,
+Auto-update, status LED, sleep-mode, and lock-setting switches so those helpers
+stay local while the primary light, fan, or switch remains available.
+
 Report integration issues in this repository. CORE application support and
 documentation remain at [core.wackyengineering.com](https://core.wackyengineering.com).

@@ -6,6 +6,26 @@ from typing import Any
 
 from .const import SUPPORTED_DOMAINS
 
+CONFIGURATION_HELPER_SUFFIXES = (
+    "_auto_off_enabled",
+    "_auto_update_enabled",
+    "_dock_child_lock",
+    "_do_not_disturb",
+    "_fan_sleep_mode",
+    "_led",
+)
+
+
+def is_configuration_helper_entity_id(entity_id: str) -> bool:
+    """Recognize narrowly scoped switch settings left uncategorized by integrations."""
+
+    domain, separator, object_id = entity_id.partition(".")
+    return bool(
+        separator
+        and domain == "switch"
+        and any(object_id.endswith(suffix) for suffix in CONFIGURATION_HELPER_SUFFIXES)
+    )
+
 
 def entity_category_value(entity_entry: Any | None) -> str | None:
     """Return the normalized Home Assistant category CORE understands."""
@@ -29,6 +49,8 @@ def should_sync_entity(state: Any, entity_entry: Any | None = None) -> bool:
     entity_id = str(getattr(state, "entity_id", ""))
     domain = entity_id.partition(".")[0]
     if domain not in SUPPORTED_DOMAINS:
+        return False
+    if is_configuration_helper_entity_id(entity_id):
         return False
 
     if entity_entry is None:
