@@ -35,7 +35,9 @@ ALLOWED_DATA_KEYS = {
     ("fan", "turn_on"): frozenset({"entity_id"}),
     ("fan", "turn_off"): frozenset({"entity_id"}),
     ("fan", "set_percentage"): frozenset({"entity_id", "percentage"}),
-    ("climate", "set_temperature"): frozenset({"entity_id", "temperature"}),
+    ("climate", "set_temperature"): frozenset(
+        {"entity_id", "temperature", "target_temp_low", "target_temp_high"}
+    ),
     ("climate", "set_hvac_mode"): frozenset({"entity_id", "hvac_mode"}),
     ("cover", "open_cover"): frozenset({"entity_id"}),
     ("cover", "close_cover"): frozenset({"entity_id"}),
@@ -73,6 +75,17 @@ def validate_command(command: dict[str, Any]) -> ValidatedCommand:
         _bounded_number(data, "position", 0, 100)
     if "temperature" in data:
         _bounded_number(data, "temperature", -50, 150)
+    has_low = "target_temp_low" in data
+    has_high = "target_temp_high" in data
+    if has_low != has_high:
+        raise UnsafeCommand("temperature range requires both limits")
+    if has_low:
+        _bounded_number(data, "target_temp_low", -50, 150)
+        _bounded_number(data, "target_temp_high", -50, 150)
+        if data["target_temp_low"] >= data["target_temp_high"]:
+            raise UnsafeCommand("temperature range is invalid")
+    if "temperature" in data and has_low:
+        raise UnsafeCommand("temperature command cannot mix a target and a range")
     if "hvac_mode" in data and data["hvac_mode"] not in {
         "off",
         "heat",

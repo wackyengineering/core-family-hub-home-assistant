@@ -93,6 +93,9 @@ def state_to_payload(
         "friendlyName": friendly_name,
         "state": raw_state,
         "attributes": attributes,
-        "available": raw_state not in ("unknown", "unavailable"),
+        # Home Assistant uses "unknown" when an entity is reachable but has not
+        # produced a value. Only its explicit "unavailable" state means CORE
+        # should present the entity as offline/unreachable.
+        "available": raw_state != "unavailable",
         "lastChangedAt": _iso(getattr(state, "last_changed", None)),
     }
