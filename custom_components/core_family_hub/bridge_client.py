@@ -126,6 +126,36 @@ class CoreBridgeClient:
         commands = response.get("commands", [])
         return commands if isinstance(commands, list) else []
 
+    async def async_pull_camera_work(self) -> dict[str, list[dict[str, Any]]]:
+        response = await self._request({"action": "camera-pull"})
+        requests = response.get("requests", [])
+        candidates = response.get("candidates", [])
+        return {
+            "requests": requests if isinstance(requests, list) else [],
+            "candidates": candidates if isinstance(candidates, list) else [],
+        }
+
+    async def async_send_camera_signals(
+        self, session_id: str, signals: list[dict[str, Any]]
+    ) -> None:
+        await self._request(
+            {
+                "action": "camera-signal",
+                "cameraSessionId": session_id,
+                "cameraSignals": signals,
+            }
+        )
+
+    async def async_acknowledge_camera_candidates(self, candidate_ids: list[str]) -> None:
+        if not candidate_ids:
+            return
+        await self._request(
+            {
+                "action": "camera-candidate-ack",
+                "cameraCandidateIds": candidate_ids,
+            }
+        )
+
     async def async_acknowledge(
         self,
         command_id: str,

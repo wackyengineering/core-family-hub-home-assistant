@@ -39,6 +39,9 @@ ALLOWED_ATTRIBUTES = {
     "binary_sensor": frozenset({"device_class"}),
     "cover": frozenset({"current_position", "device_class"}),
     "scene": frozenset(),
+    # Camera source URLs, access tokens, thumbnails, and stream metadata stay
+    # inside Home Assistant. CORE synchronizes identity/state only.
+    "camera": frozenset(),
 }
 
 

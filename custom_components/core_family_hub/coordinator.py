@@ -8,15 +8,18 @@ import logging
 from typing import Any
 
 from homeassistant.const import EVENT_STATE_CHANGED, __version__ as HOME_ASSISTANT_VERSION
+from homeassistant.components.camera.helper import get_camera_from_entity_id
 from homeassistant.core import Event, HomeAssistant, State, callback
 from homeassistant.helpers import area_registry as ar, device_registry as dr, entity_registry as er
 from homeassistant.helpers.storage import Store
+from webrtc_models import RTCIceCandidateInit
 
 from .batching import take_pending_batch
 from .bridge_client import CoreBridgeAuthenticationError, CoreBridgeClient, CoreBridgeError
 from .command_policy import UnsafeCommand, validate_command
 from .const import (
     COMMAND_PULL_LIMIT,
+    CAMERA_REQUEST_PULL_LIMIT,
     CONNECTED_COMMAND_POLL_SECONDS,
     FALLBACK_COMMAND_POLL_SECONDS,
     HEARTBEAT_SECONDS,
@@ -49,6 +52,8 @@ class CoreBridgeRuntime:
         self._unsub_state: Callable[[], None] | None = None
         self._cursor = 0
         self._executed: dict[str, dict[str, Any]] = {}
+        self._camera_sessions: dict[str, str] = {}
+        self._camera_signal_locks: dict[str, asyncio.Lock] = {}
         self._store = Store(hass, STORE_VERSION, f"core_family_hub.{entry_id}")
 
     async def async_start(self) -> None:
@@ -82,6 +87,13 @@ class CoreBridgeRuntime:
         for task in self._tasks:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
+        for session_id, entity_id in list(self._camera_sessions.items()):
+            try:
+                get_camera_from_entity_id(self.hass, entity_id).close_webrtc_session(session_id)
+            except Exception:  # The camera may already have been removed.
+                pass
+        self._camera_sessions.clear()
+        self._camera_signal_locks.clear()
         await self._save_store()
 
     def _registries(self) -> tuple[Any, Any, Any]:
@@ -189,13 +201,103 @@ class CoreBridgeRuntime:
                     commands = await self.client.async_pull_commands()
                     for command in commands:
                         await self._execute_command(command)
-                    if len(commands) < COMMAND_PULL_LIMIT:
+                    camera_work = await self.client.async_pull_camera_work()
+                    camera_requests = camera_work["requests"]
+                    camera_candidates = camera_work["candidates"]
+                    for camera_request in camera_requests:
+                        await self._execute_camera_request(camera_request)
+                    await self._execute_camera_candidates(camera_candidates)
+                    if (
+                        len(commands) < COMMAND_PULL_LIMIT
+                        and len(camera_requests) < CAMERA_REQUEST_PULL_LIMIT
+                        and len(camera_candidates) < 25
+                    ):
                         break
             except CoreBridgeAuthenticationError:
                 _LOGGER.error("CORE connector was revoked; re-pair the integration")
                 return
             except CoreBridgeError as err:
                 _LOGGER.warning("Could not retrieve CORE commands: %s", err)
+
+    async def _send_camera_signal(self, session_id: str, message: dict[str, Any]) -> None:
+        lock = self._camera_signal_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            try:
+                await self.client.async_send_camera_signals(session_id, [message])
+            except CoreBridgeError as err:
+                _LOGGER.warning("Could not forward CORE camera signal %s: %s", session_id, err)
+
+    async def _execute_camera_request(self, raw_request: dict[str, Any]) -> None:
+        session_id = str(raw_request.get("id") or "")
+        entity_id = str(raw_request.get("entityId") or "")
+        action = str(raw_request.get("action") or "")
+        try:
+            if not session_id or not entity_id.startswith("camera.") or action not in {"offer", "close"}:
+                raise ValueError("Camera session request is invalid")
+            camera = get_camera_from_entity_id(self.hass, entity_id)
+            if action == "close":
+                camera.close_webrtc_session(session_id)
+                self._camera_sessions.pop(session_id, None)
+                self._camera_signal_locks.pop(session_id, None)
+                await self.client.async_send_camera_signals(
+                    session_id,
+                    [{"type": "error", "code": "session_closed", "message": "Camera session closed"}],
+                )
+                return
+
+            offer = str(raw_request.get("offer") or "")
+            if not offer.startswith("v=0"):
+                raise ValueError("Camera WebRTC offer is invalid")
+            state = self.hass.states.get(entity_id)
+            if state is None or state.state == "unavailable":
+                raise ValueError("Camera is unavailable in Home Assistant")
+            self._camera_sessions[session_id] = entity_id
+
+            @callback
+            def send_message(message: Any) -> None:
+                self.hass.async_create_task(
+                    self._send_camera_signal(session_id, message.as_dict()),
+                    f"CORE camera signal {session_id}",
+                )
+
+            await camera.async_handle_async_webrtc_offer(offer, session_id, send_message)
+        except Exception as err:  # Camera providers expose integration-specific errors.
+            self._camera_sessions.pop(session_id, None)
+            message = str(err)[:500] or "Home Assistant could not start this camera"
+            _LOGGER.warning("CORE camera session %s failed: %s", session_id, message)
+            if session_id:
+                try:
+                    await self.client.async_send_camera_signals(
+                        session_id,
+                        [{"type": "error", "code": "webrtc_failed", "message": message}],
+                    )
+                except CoreBridgeError as acknowledge_error:
+                    _LOGGER.warning("Could not report CORE camera failure %s: %s", session_id, acknowledge_error)
+
+    async def _execute_camera_candidates(self, raw_candidates: list[dict[str, Any]]) -> None:
+        acknowledged: list[str] = []
+        for raw_candidate in raw_candidates:
+            candidate_id = str(raw_candidate.get("id") or "")
+            session_id = str(raw_candidate.get("sessionId") or "")
+            entity_id = self._camera_sessions.get(session_id)
+            try:
+                if not candidate_id or not session_id or not entity_id:
+                    raise ValueError("Camera candidate session is unavailable")
+                candidate = RTCIceCandidateInit.from_dict(raw_candidate.get("candidate") or {})
+                camera = get_camera_from_entity_id(self.hass, entity_id)
+                await camera.async_on_webrtc_candidate(session_id, candidate)
+            except Exception as err:
+                _LOGGER.warning("CORE camera candidate %s failed: %s", candidate_id, err)
+                if session_id:
+                    await self._send_camera_signal(
+                        session_id,
+                        {"type": "error", "code": "candidate_failed", "message": str(err)[:500]},
+                    )
+            finally:
+                if candidate_id:
+                    acknowledged.append(candidate_id)
+        if acknowledged:
+            await self.client.async_acknowledge_camera_candidates(acknowledged)
 
     async def _execute_command(self, raw_command: dict[str, Any]) -> None:
         command_id = str(raw_command.get("id") or "")
