@@ -44,6 +44,7 @@ class CoreBridgeRuntime:
         self.client = client
         self._stop = asyncio.Event()
         self._command_wakeup = asyncio.Event()
+        self._camera_wakeup = asyncio.Event()
         self._realtime_ready = asyncio.Event()
         self._state_wakeup = asyncio.Event()
         self._sync_lock = asyncio.Lock()
@@ -73,6 +74,7 @@ class CoreBridgeRuntime:
         self._tasks = [
             self.hass.async_create_task(self._state_worker()),
             self.hass.async_create_task(self._command_worker()),
+            self.hass.async_create_task(self._camera_worker()),
             self.hass.async_create_task(self._heartbeat_worker()),
             self.hass.async_create_task(self._realtime_worker()),
             self.hass.async_create_task(self._startup_reconciliation_worker()),
@@ -81,6 +83,7 @@ class CoreBridgeRuntime:
     async def async_stop(self) -> None:
         self._stop.set()
         self._command_wakeup.set()
+        self._camera_wakeup.set()
         self._state_wakeup.set()
         if self._unsub_state:
             self._unsub_state()
@@ -201,6 +204,37 @@ class CoreBridgeRuntime:
                     commands = await self.client.async_pull_commands()
                     for command in commands:
                         await self._execute_command(command)
+                    if len(commands) < COMMAND_PULL_LIMIT:
+                        break
+            except CoreBridgeAuthenticationError:
+                _LOGGER.error("CORE connector was revoked; re-pair the integration")
+                return
+            except CoreBridgeError as err:
+                _LOGGER.warning("Could not retrieve CORE commands: %s", err)
+            except Exception as err:  # Keep one malformed provider response from stopping the worker.
+                _LOGGER.exception("Unexpected CORE command worker failure: %s", err)
+
+    async def _camera_worker(self) -> None:
+        """Process camera signaling independently from device commands.
+
+        Camera negotiation has a short browser timeout. A slow Home Assistant
+        service call or an unexpected command-provider error must not prevent
+        the companion from claiming a queued camera offer while heartbeats
+        continue normally.
+        """
+        while not self._stop.is_set():
+            try:
+                poll_seconds = (
+                    CONNECTED_COMMAND_POLL_SECONDS
+                    if self._realtime_ready.is_set()
+                    else FALLBACK_COMMAND_POLL_SECONDS
+                )
+                await asyncio.wait_for(self._camera_wakeup.wait(), poll_seconds)
+            except TimeoutError:
+                pass
+            self._camera_wakeup.clear()
+            try:
+                while not self._stop.is_set():
                     camera_work = await self.client.async_pull_camera_work()
                     camera_requests = camera_work["requests"]
                     camera_candidates = camera_work["candidates"]
@@ -208,8 +242,7 @@ class CoreBridgeRuntime:
                         await self._execute_camera_request(camera_request)
                     await self._execute_camera_candidates(camera_candidates)
                     if (
-                        len(commands) < COMMAND_PULL_LIMIT
-                        and len(camera_requests) < CAMERA_REQUEST_PULL_LIMIT
+                        len(camera_requests) < CAMERA_REQUEST_PULL_LIMIT
                         and len(camera_candidates) < 25
                     ):
                         break
@@ -217,7 +250,9 @@ class CoreBridgeRuntime:
                 _LOGGER.error("CORE connector was revoked; re-pair the integration")
                 return
             except CoreBridgeError as err:
-                _LOGGER.warning("Could not retrieve CORE commands: %s", err)
+                _LOGGER.warning("Could not retrieve CORE camera work: %s", err)
+            except Exception as err:  # Camera integrations expose provider-specific failures.
+                _LOGGER.exception("Unexpected CORE camera worker failure: %s", err)
 
     async def _send_camera_signal(self, session_id: str, message: dict[str, Any]) -> None:
         lock = self._camera_signal_locks.setdefault(session_id, asyncio.Lock())
@@ -371,15 +406,18 @@ class CoreBridgeRuntime:
                     return
                 _LOGGER.debug("CORE realtime wake-up disconnected: %s", err)
                 self._command_wakeup.set()
+                self._camera_wakeup.set()
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 60)
 
     async def _wake_commands(self) -> None:
         self._command_wakeup.set()
+        self._camera_wakeup.set()
 
     async def _mark_realtime_ready(self) -> None:
         self._realtime_ready.set()
         self._command_wakeup.set()
+        self._camera_wakeup.set()
 
     async def _save_store(self) -> None:
         await self._store.async_save({"cursor": self._cursor, "executed": self._executed})
