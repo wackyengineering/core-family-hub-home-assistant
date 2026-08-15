@@ -68,7 +68,11 @@ class CoreBridgeClient:
                 return body
         except (CoreBridgeError, CoreBridgeAuthenticationError):
             raise
-        except (TimeoutError, OSError) as err:
+        # aiohttp can surface transient disconnects through several exception
+        # families (including provider-specific ClientError subclasses). Wrap
+        # every ordinary request failure so long-running coordinator workers
+        # retry instead of silently terminating until the integration reloads.
+        except Exception as err:
             raise CoreBridgeError(f"CORE bridge is unavailable: {err}") from err
 
     async def async_pair(
